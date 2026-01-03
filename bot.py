@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 from typing import Dict
 
 from aiogram import Bot, Dispatcher
@@ -10,7 +11,8 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from characters import format_character, generate_character
-from config import BOT_TOKEN, NARRATOR
+from config import BOT_TOKEN, GEMINI_API_KEY, GEMINI_MODEL, NARRATOR
+from ai_narrator import generate_cataclysm_story, pick_default_cataclysm_topic
 from events import random_event
 from game import Game
 
@@ -83,6 +85,20 @@ async def cmd_newgame(message: Message) -> None:
         f"<b>{NARRATOR}:</b> ☢️ Створено гру «Бункер». Напишіть /join.\n"
         "Кожен гравець має відкрити приват із ботом і натиснути Start — інакше персонаж не прийде."
     )
+
+    if GEMINI_API_KEY:
+        topic = pick_default_cataclysm_topic()
+        try:
+            story = await generate_cataclysm_story(
+                api_key=GEMINI_API_KEY,
+                model=GEMINI_MODEL,
+                cataclysm_type=topic,
+            )
+        except Exception as err:
+            await message.answer(f"<b>{NARRATOR}:</b> Помилка генерації вступу: {escape(str(err))}")
+            return
+
+        await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
 
 
 @dp.message(Command("join"))
@@ -170,6 +186,34 @@ async def cmd_round(message: Message) -> None:
         f"{event['text']}\n\n"
         "🗳️ Голосування відкрито. Команда: /vote @username"
     )
+
+
+@dp.message(Command("cataclysm"))
+async def cmd_cataclysm(message: Message) -> None:
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.answer(f"<b>{NARRATOR}:</b> Формат: /cataclysm <тема>")
+        return
+
+    if not GEMINI_API_KEY:
+        await message.answer(
+            f"<b>{NARRATOR}:</b> Не налаштовано Gemini. "
+            "Додайте змінну середовища GEMINI_API_KEY (Railway → Variables)."
+        )
+        return
+
+    topic = parts[1].strip()
+    try:
+        story = await generate_cataclysm_story(
+            api_key=GEMINI_API_KEY,
+            model=GEMINI_MODEL,
+            cataclysm_type=topic,
+        )
+    except Exception as err:
+        await message.answer(f"<b>{NARRATOR}:</b> Помилка генерації: {escape(str(err))}")
+        return
+
+    await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
 
 
 @dp.message(Command("vote"))
