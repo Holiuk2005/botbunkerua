@@ -1,4 +1,5 @@
 import random
+from typing import Optional
 
 
 PROFESSIONS = [
@@ -49,7 +50,7 @@ SECRETS = [
 ]
 
 
-def generate_character(rng: random.Random | None = None) -> dict:
+def generate_character(rng: Optional[random.Random] = None) -> dict:
     rng = rng or random
     return {
         "profession": rng.choice(PROFESSIONS),

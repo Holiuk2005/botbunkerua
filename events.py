@@ -1,4 +1,5 @@
 import random
+from typing import Optional
 
 
 EVENTS = [
@@ -17,6 +18,6 @@ EVENTS = [
 ]
 
 
-def random_event(rng: random.Random | None = None) -> dict:
+def random_event(rng: Optional[random.Random] = None) -> dict:
     rng = rng or random
     return rng.choice(EVENTS)
