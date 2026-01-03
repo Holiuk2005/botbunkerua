@@ -33,6 +33,33 @@ class GeminiModel:
     supported_methods: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class GeminiQuotaError(Exception):
+    status_code: int
+    message: str
+    retry_after_s: Optional[int] = None
+    raw: Optional[str] = None
+
+    def __str__(self) -> str:
+        base = f"Gemini quota/rate limit ({self.status_code}): {self.message}"
+        if self.retry_after_s is not None:
+            return f"{base} (retry_after={self.retry_after_s}s)"
+        return base
+
+
+def _parse_retry_after_seconds(error_json: dict) -> Optional[int]:
+    details = error_json.get("error", {}).get("details") or []
+    for d in details:
+        if d.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
+            delay = d.get("retryDelay")
+            if isinstance(delay, str) and delay.endswith("s"):
+                try:
+                    return int(delay[:-1])
+                except ValueError:
+                    return None
+    return None
+
+
 async def list_gemini_models(*, api_key: str, timeout_s: float = 20.0) -> list[GeminiModel]:
     url = "https://generativelanguage.googleapis.com/v1beta/models"
     params = {"key": api_key}
@@ -141,6 +168,23 @@ async def generate_cataclysm_story(
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, params=params, json=payload) as resp:
                 text = await resp.text()
+                if resp.status == 429:
+                    try:
+                        parsed = json.loads(text)
+                    except Exception:
+                        parsed = {}
+                    retry_after = _parse_retry_after_seconds(parsed) if parsed else None
+                    message = (
+                        (parsed.get("error") or {}).get("message")
+                        if isinstance(parsed, dict)
+                        else None
+                    )
+                    raise GeminiQuotaError(
+                        status_code=429,
+                        message=message or "RESOURCE_EXHAUSTED",
+                        retry_after_s=retry_after,
+                        raw=text,
+                    )
                 if resp.status >= 400:
                     raise RuntimeError(f"Gemini API error {resp.status}: {text}")
         return text

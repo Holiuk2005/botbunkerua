@@ -12,7 +12,7 @@ from aiogram.types import Message
 
 from characters import format_character, generate_character
 from config import BOT_TOKEN, GEMINI_API_KEY, GEMINI_MODEL, NARRATOR
-from ai_narrator import generate_cataclysm_story, pick_default_cataclysm_topic
+from ai_narrator import GeminiQuotaError, generate_cataclysm_story, pick_default_cataclysm_topic
 from events import random_event
 from game import Game
 
@@ -23,6 +23,21 @@ dp = Dispatcher()
 
 # games[chat_id] = Game
 GAMES: Dict[int, Game] = {}
+
+# Simple anti-spam for expensive AI calls (per chat)
+_LAST_AI_CALL_AT: Dict[int, float] = {}
+_AI_COOLDOWN_S: float = 30.0
+
+
+def _ai_rate_limited(chat_id: int) -> float:
+    now = asyncio.get_running_loop().time()
+    last = _LAST_AI_CALL_AT.get(chat_id, 0.0)
+    wait = _AI_COOLDOWN_S - (now - last)
+    return wait
+
+
+def _mark_ai_call(chat_id: int) -> None:
+    _LAST_AI_CALL_AT[chat_id] = asyncio.get_running_loop().time()
 
 
 def is_group(message: Message) -> bool:
@@ -87,13 +102,28 @@ async def cmd_newgame(message: Message) -> None:
     )
 
     if GEMINI_API_KEY:
+        wait = _ai_rate_limited(message.chat.id)
+        if wait > 0:
+            await message.answer(
+                f"<b>{NARRATOR}:</b> Ведучий-ШІ тимчасово обмежений. Спробуйте через {int(wait)} с."
+            )
+            return
+
         topic = pick_default_cataclysm_topic()
         try:
+            _mark_ai_call(message.chat.id)
             story = await generate_cataclysm_story(
                 api_key=GEMINI_API_KEY,
                 model=GEMINI_MODEL,
                 cataclysm_type=topic,
             )
+        except GeminiQuotaError as err:
+            retry = f" Спробуйте через {err.retry_after_s} с." if err.retry_after_s else ""
+            await message.answer(
+                f"<b>{NARRATOR}:</b> Ліміт Gemini вичерпано або квота = 0.{retry}\n"
+                "Перевірте тариф/білінг та ліміти ключа в Google AI Studio."
+            )
+            return
         except Exception as err:
             await message.answer(f"<b>{NARRATOR}:</b> Помилка генерації вступу: {escape(str(err))}")
             return
@@ -204,11 +234,26 @@ async def cmd_cataclysm(message: Message) -> None:
 
     topic = parts[1].strip()
     try:
+        wait = _ai_rate_limited(message.chat.id)
+        if wait > 0:
+            await message.answer(
+                f"<b>{NARRATOR}:</b> Ведучий-ШІ тимчасово обмежений. Спробуйте через {int(wait)} с."
+            )
+            return
+
+        _mark_ai_call(message.chat.id)
         story = await generate_cataclysm_story(
             api_key=GEMINI_API_KEY,
             model=GEMINI_MODEL,
             cataclysm_type=topic,
         )
+    except GeminiQuotaError as err:
+        retry = f" Спробуйте через {err.retry_after_s} с." if err.retry_after_s else ""
+        await message.answer(
+            f"<b>{NARRATOR}:</b> Ліміт Gemini вичерпано або квота = 0.{retry}\n"
+            "Перевірте тариф/білінг та ліміти ключа в Google AI Studio."
+        )
+        return
     except Exception as err:
         await message.answer(f"<b>{NARRATOR}:</b> Помилка генерації: {escape(str(err))}")
         return
