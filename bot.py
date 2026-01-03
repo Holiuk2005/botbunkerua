@@ -40,6 +40,12 @@ def _mark_ai_call(chat_id: int) -> None:
     _LAST_AI_CALL_AT[chat_id] = asyncio.get_running_loop().time()
 
 
+def _fallback_cataclysm_text() -> str:
+    # Uses the legacy event list as a simple, offline fallback.
+    event = random_event()
+    return event["text"]
+
+
 def is_group(message: Message) -> bool:
     return message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
 
@@ -101,34 +107,29 @@ async def cmd_newgame(message: Message) -> None:
         "Кожен гравець має відкрити приват із ботом і натиснути Start — інакше персонаж не прийде."
     )
 
-    if GEMINI_API_KEY:
-        wait = _ai_rate_limited(message.chat.id)
-        if wait > 0:
-            await message.answer(
-                f"<b>{NARRATOR}:</b> Ведучий-ШІ тимчасово обмежений. Спробуйте через {int(wait)} с."
-            )
-            return
-
-        topic = pick_default_cataclysm_topic()
-        try:
-            _mark_ai_call(message.chat.id)
-            story = await generate_cataclysm_story(
-                api_key=GEMINI_API_KEY,
-                model=GEMINI_MODEL,
-                cataclysm_type=topic,
-            )
-        except GeminiQuotaError as err:
-            retry = f" Спробуйте через {err.retry_after_s} с." if err.retry_after_s else ""
-            await message.answer(
-                f"<b>{NARRATOR}:</b> Ліміт Gemini вичерпано або квота = 0.{retry}\n"
-                "Перевірте тариф/білінг та ліміти ключа в Google AI Studio."
-            )
-            return
-        except Exception as err:
-            await message.answer(f"<b>{NARRATOR}:</b> Помилка генерації вступу: {escape(str(err))}")
-            return
-
+    # AI narrator intro (silent fallback to legacy events)
+    story: str
+    if not GEMINI_API_KEY:
+        story = _fallback_cataclysm_text()
         await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
+        return
+
+    if _ai_rate_limited(message.chat.id) > 0:
+        story = _fallback_cataclysm_text()
+        await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
+        return
+
+    topic = pick_default_cataclysm_topic()
+    try:
+        _mark_ai_call(message.chat.id)
+        story = await generate_cataclysm_story(
+            api_key=GEMINI_API_KEY,
+            model=GEMINI_MODEL,
+            cataclysm_type=topic,
+        )
+    except (GeminiQuotaError, Exception):
+        story = _fallback_cataclysm_text()
+    await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
 
 
 @dp.message(Command("join"))
@@ -225,38 +226,23 @@ async def cmd_cataclysm(message: Message) -> None:
         await message.answer(f"<b>{NARRATOR}:</b> Формат: /cataclysm <тема>")
         return
 
-    if not GEMINI_API_KEY:
-        await message.answer(
-            f"<b>{NARRATOR}:</b> Не налаштовано Gemini. "
-            "Додайте змінну середовища GEMINI_API_KEY (Railway → Variables)."
-        )
+    topic = parts[1].strip()
+
+    # Silent fallback to legacy events when Gemini is unavailable/limited.
+    if not GEMINI_API_KEY or _ai_rate_limited(message.chat.id) > 0:
+        story = _fallback_cataclysm_text()
+        await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
         return
 
-    topic = parts[1].strip()
     try:
-        wait = _ai_rate_limited(message.chat.id)
-        if wait > 0:
-            await message.answer(
-                f"<b>{NARRATOR}:</b> Ведучий-ШІ тимчасово обмежений. Спробуйте через {int(wait)} с."
-            )
-            return
-
         _mark_ai_call(message.chat.id)
         story = await generate_cataclysm_story(
             api_key=GEMINI_API_KEY,
             model=GEMINI_MODEL,
             cataclysm_type=topic,
         )
-    except GeminiQuotaError as err:
-        retry = f" Спробуйте через {err.retry_after_s} с." if err.retry_after_s else ""
-        await message.answer(
-            f"<b>{NARRATOR}:</b> Ліміт Gemini вичерпано або квота = 0.{retry}\n"
-            "Перевірте тариф/білінг та ліміти ключа в Google AI Studio."
-        )
-        return
-    except Exception as err:
-        await message.answer(f"<b>{NARRATOR}:</b> Помилка генерації: {escape(str(err))}")
-        return
+    except (GeminiQuotaError, Exception):
+        story = _fallback_cataclysm_text()
 
     await message.answer(f"<b>{NARRATOR}:</b>\n{escape(story)}")
 
