@@ -1,5 +1,6 @@
 import json
 import random
+from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
@@ -17,6 +18,72 @@ DEFAULT_CATASTLYSM_TOPICS = [
 def pick_default_cataclysm_topic(rng: Optional[random.Random] = None) -> str:
     rng = rng or random
     return rng.choice(DEFAULT_CATASTLYSM_TOPICS)
+
+
+def _normalize_model(model: str) -> str:
+    model = (model or "").strip()
+    if not model:
+        return model
+    return model if model.startswith("models/") else f"models/{model}"
+
+
+@dataclass(frozen=True)
+class GeminiModel:
+    name: str
+    supported_methods: tuple[str, ...]
+
+
+async def list_gemini_models(*, api_key: str, timeout_s: float = 20.0) -> list[GeminiModel]:
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    params = {"key": api_key}
+
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params) as resp:
+            text = await resp.text()
+            if resp.status >= 400:
+                raise RuntimeError(f"Gemini models:list error {resp.status}: {text}")
+
+    data = json.loads(text)
+    models = []
+    for m in data.get("models", []) or []:
+        name = m.get("name")
+        if not name:
+            continue
+        methods = tuple(m.get("supportedGenerationMethods", []) or [])
+        models.append(GeminiModel(name=name, supported_methods=methods))
+    return models
+
+
+def pick_best_model(available: list[GeminiModel], preferred: Optional[str]) -> str:
+    preferred_norm = _normalize_model(preferred or "") if preferred else ""
+
+    def supports_generate(model: GeminiModel) -> bool:
+        return "generateContent" in model.supported_methods
+
+    available_generate = [m for m in available if supports_generate(m)]
+    if not available_generate:
+        raise RuntimeError("Gemini API: немає доступних моделей з методом generateContent")
+
+    if preferred_norm:
+        for m in available_generate:
+            if m.name == preferred_norm:
+                return m.name
+
+    # Fallback order: try a few common model names if available, otherwise pick first.
+    common = [
+        "models/gemini-2.0-flash",
+        "models/gemini-2.0-flash-lite",
+        "models/gemini-1.5-flash-latest",
+        "models/gemini-1.5-pro-latest",
+        "models/gemini-1.0-pro",
+    ]
+    names = {m.name for m in available_generate}
+    for c in common:
+        if c in names:
+            return c
+
+    return available_generate[0].name
 
 
 def build_cataclysm_prompt(cataclysm_type: str) -> str:
@@ -65,28 +132,33 @@ async def generate_cataclysm_story(
 ) -> str:
     prompt = build_cataclysm_prompt(cataclysm_type)
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    params = {"key": api_key}
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt,
-                    }
-                ]
-            }
-        ]
-    }
+    async def _call_generate(*, model_name: str) -> str:
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent"
+        params = {"key": api_key}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
-    timeout = aiohttp.ClientTimeout(total=timeout_s)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, params=params, json=payload) as resp:
-            text = await resp.text()
-            if resp.status >= 400:
-                raise RuntimeError(f"Gemini API error {resp.status}: {text}")
+        timeout = aiohttp.ClientTimeout(total=timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, params=params, json=payload) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise RuntimeError(f"Gemini API error {resp.status}: {text}")
+        return text
 
-    data = json.loads(text)
+    requested_model = _normalize_model(model)
+    try:
+        raw = await _call_generate(model_name=requested_model)
+    except RuntimeError as err:
+        # If model is not found/available for this key, auto-pick a valid one.
+        msg = str(err)
+        if " 404" in msg or "NOT_FOUND" in msg or "is not found" in msg:
+            available = await list_gemini_models(api_key=api_key)
+            picked = pick_best_model(available, preferred=model)
+            raw = await _call_generate(model_name=picked)
+        else:
+            raise
+
+    data = json.loads(raw)
     candidates = data.get("candidates") or []
     if not candidates:
         raise RuntimeError("Gemini API: порожня відповідь")
